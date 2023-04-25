@@ -1,0 +1,453 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <script type="text/javascript">
+
+        /*
+            TODO
+
+            convert sorted canvas back into an image
+            add buttons for various kinds of sorting
+            fix scrolling when clicking on the sort button
+            allow urls
+            allow drag & drop from other pages
+            do something about saturation stripes
+                median
+                swap pixels to places with more similar neigbors
+
+            run offline on tumblr feed
+            reduce to areas of solid color to create a palette.  maybe outsource to imagemagick
+
+            optimize by keeping array around
+
+
+        */
+
+
+        var READY_STATUS = '&nbsp;'
+        var FIRSTLOAD_STATUS = '&nbsp;';
+        var SORTING_STATUS = 'Sorting (be patient)';
+        var FINISHING_STATUS = 'Finishing up...';
+        var FILENAME = null;
+        var SORTING_FILENAME = null;
+        var STATE = 'ready';
+
+        //================================================================================
+        // UTILS
+
+        var rgb2hsv = function(r,g,b) {
+            // given r,g,b in the range 0-255,
+            // return [h,s,v] in the range 0-1
+            var rr, gg, bb,
+                r = r / 255,
+                g = g / 255,
+                b = b / 255,
+                h, s,
+                v = Math.max(r, g, b),
+                diff = v - Math.min(r, g, b),
+                diffc = function(c) {
+                    return (v - c) / 6 / diff + 1 / 2;
+                };
+            if (diff == 0) {
+                h = s = 0;
+            } else {
+                s = diff / v;
+                rr = diffc(r);
+                gg = diffc(g);
+                bb = diffc(b);
+
+                if (r === v) {      h = bb - gg; }
+                else if (g === v) { h = (1 / 3) + rr - bb; }
+                else if (b === v) { h = (2 / 3) + gg - rr; }
+
+                if (h < 0) {      h += 1; }
+                else if (h > 1) { h -= 1; }
+            }
+            return [h, s, v];
+        };
+
+        //================================================================================
+        // INTERFACE
+
+        var setStatus = function(msg) {
+            document.getElementById('status').innerHTML = msg;
+        };
+
+        //================================================================================
+        // SORTING
+
+        var sortOneStep = function(sort_list, my_canvas, context, ii) {
+            // do one step of sorting and queue up the next one
+
+            var first_is_horizontal = 1;
+
+            // on first step, remember the filename
+            if (ii == 0) {
+                SORTING_FILENAME = FILENAME;
+            }
+
+            // if the filename has changed, stop
+            if (ii > 0 && FILENAME != SORTING_FILENAME) {
+                finish(my_canvas, false); // need to avoid copy here or something
+                return;
+            }
+
+            // stop when we've finished all the sorts
+            if (ii >= sort_list.length) {
+                finish(my_canvas, true);
+                return;
+            }
+
+            sortImage(my_canvas, context, ii, (ii+first_is_horizontal) % 2, sort_list[ii]);
+            var bar_chars = [];
+            for (var char_ii = 0; char_ii < sort_list.length; char_ii++) {
+                if (char_ii <= ii) { bar_chars.push('='); }
+                else               { bar_chars.push('&nbsp;'); }
+            }
+            setStatus(SORTING_STATUS + ' <code>[' + bar_chars.join('') + ']</code>');
+            var timeout_length = 100;
+            //if (ii === 1) { timeout_length = 2500; }
+            setTimeout(function() {sortOneStep(sort_list, my_canvas, context, ii+1);}, timeout_length);
+        };
+
+        var finish = function(my_canvas, done) {
+            setStatus(FINISHING_STATUS);
+            var my_image = document.getElementById('my-image');
+            if (done) {
+                my_image.src = my_canvas.toDataURL('image/png');
+            }
+            my_image.className = '';
+            my_canvas.className = 'invisible';
+            setStatus(READY_STATUS);
+            console.log('DONE');
+            STATE = 'ready';
+            document.getElementById('sort-button-quick').className = 'ready-button';
+            document.getElementById('sort-button-thorough').className = 'ready-button';
+        }
+
+        var sortImage = function(my_canvas, context, ii, is_horizontal, kind) {
+            // sort the entire image
+
+            var dir_name;
+            if (is_horizontal) {
+                dir_name = 'horizontal';
+                for (var y = 0; y < my_canvas.height; y+= 1) {
+                    sortRegion(context, 0, y, my_canvas.width, 1, kind);
+                }
+            } else {
+                dir_name = 'vertical';
+                for (var x = 0; x < my_canvas.width; x+= 1) {
+                    sortRegion(context, x, 0, 1, my_canvas.height, kind);
+                }
+            }
+            console.log('' + ii + ' -- sorted ' + dir_name + ' by ' + kind);
+        };
+
+        var sortRegion = function(context, x, y, width, height, kind) {
+            // sort a rectangular region of the image, usually a single row or column of pixels
+            // kind should be one of: random, semirandom, v, h, h2, s, magic
+
+            // fetch image data
+            var imgData = context.getImageData(x, y, width, height);
+            var data = imgData.data;
+
+            // convert to sortable pixel array
+            var pixels = [];
+            for (var ii = 0; ii < imgData.data.length; ii += 4) {
+                var pixel = [data[ii], data[ii+1], data[ii+2]];
+
+                switch(kind) {
+                case 'v':
+                    var sortValue = -(pixel[0] + pixel[1] + pixel[2]);
+                    var sortValue = -(pixel[0]*0.30 + pixel[1]*0.59 + pixel[2]*0.11);
+                    break;
+                case 'semirandom':
+                    var sortValue = ii/4 + Math.random() * 25;
+                    break;
+                case 'random':
+                    var sortValue = Math.random();
+                    break;
+                default:
+                    hsv = rgb2hsv(pixel[0], pixel[1], pixel[2]);
+                    var h = hsv[0];
+                    var s = hsv[1];
+                    var v = (pixel[0] + pixel[1] + pixel[2]) / (255*3);
+                    if (kind === 'magic') {
+                        var sortValue = 1-  ((h + 0.2) % 1);
+                        if (s < 0.07) {
+                            if (v < 0.5) { sortValue = v - 300;}
+                            else         { sortValue = v + 300;}
+                        } else {
+                            if (v < 0.2) { sortValue = v - 300;};
+                            if (v > 0.9) { sortValue = v + 300;};
+                        }
+                    } else if (kind === 'h') {
+                        var sortValue = h;
+                    } else if (kind === 'h2') {
+                        var sortValue = (h + 0.15) % 1;
+                        if (s < 0.07) {sortValue -= 900;}
+                    } else if (kind === 's') {
+                        var sortValue = s;
+                    }
+                }
+
+                pixels.push([sortValue, pixel]);
+            }
+
+            // sort
+            pixels.sort(function(a,b) {return a[0]-b[0];});
+
+            // write back to data array and then back to canvas
+            for (var jj = 0; jj < pixels.length; jj++) {
+                var pixel = pixels[jj][1];
+                data[jj*4 + 0] = pixel[0];
+                data[jj*4 + 1] = pixel[1];
+                data[jj*4 + 2] = pixel[2];
+            }
+            context.putImageData(imgData, x, y);
+
+        };
+
+        //================================================================================
+        // MAIN
+        var wo = window.onload;
+        window.onload = function() {
+            wo && wo.call(null);
+
+            setStatus(FIRSTLOAD_STATUS);
+
+
+            var handleDragOver = function(evt) {
+                evt.stopPropagation();
+                evt.preventDefault();
+                evt.dataTransfer.dropEffect = 'copy';
+                dropZone.className = 'big-border';
+            };
+
+            var handleDragLeave = function(evt) {
+                evt.stopPropagation();
+                evt.preventDefault();
+                dropZone.className = '';
+            };
+
+            var handleFileDrop = function(evt) {
+                // when the user drops a file,
+                // load it into an img tag
+                // and then copy the data into the canvas
+                console.log('[handleFileDrop]');
+                evt.stopPropagation();
+                evt.preventDefault();
+
+                dropZone.className = '';
+
+                var files = evt.dataTransfer.files;
+
+                // only allow one file to be dropped
+                if (files.length !== 1) {
+                    return;
+                }
+
+                for (var ii=0; ii < files.length; ii++) {
+                    var file = files[ii];
+                    FILENAME = file.name;
+                    console.log(FILENAME);
+
+                    // only allow images
+                    if (!file.type.match('image.*')) {
+                        continue;
+                    }
+
+                    var reader = new FileReader();
+                    reader.onload = (function(theFile) {
+                        return function(e) {
+                            droppedImageTag = document.getElementById('my-image').src = e.target.result;
+                        };
+                    })(file);
+
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            var body = document.getElementById('body');
+            var dropZone = document.getElementById('drop-zone');
+            body.addEventListener('dragover', handleDragOver, false);
+            body.addEventListener('dragleave', handleDragLeave, false);
+            body.addEventListener('drop', handleFileDrop, false);
+
+            var copyImgToCanvas = function(image_id, canvas_id) {
+                console.log('[copyImgToCanvas] ' + image_id + ' --> ' + canvas_id);
+                var my_image = document.getElementById(image_id);
+                var my_canvas = document.getElementById(canvas_id);
+                var context = my_canvas.getContext('2d');
+
+                my_canvas.width = my_image.width;
+                my_canvas.height = my_image.height;
+
+                my_canvas.className = '';
+                my_image.className = 'invisible';
+
+                context.drawImage(my_image, 0, 0);
+            };
+
+            var handleButtonClick = function() {
+                STATE = 'sorting';
+                console.log('[click]');
+                setStatus(SORTING_STATUS);
+                document.getElementById('sort-button-quick').className = 'disabled-button';
+                document.getElementById('sort-button-thorough').className = 'disabled-button';
+            };
+
+            var launchSorting = function(sort_list) {
+                var my_canvas = document.getElementById('my-canvas');
+                var context = my_canvas.getContext('2d');
+                copyImgToCanvas('my-image','my-canvas');
+                sortOneStep(sort_list, my_canvas, context, 0);
+            };
+
+            document.getElementById('sort-button-quick').onclick = function() {
+                if (STATE === 'sorting') { return; }
+                handleButtonClick();
+                // random, semirandom, v, h, h2, s, magic
+                var sort_list = ['semirandom', 'v']
+                setTimeout(function(){launchSorting(sort_list)},1)
+            };
+            document.getElementById('sort-button-thorough').onclick = function() {
+                if (STATE === 'sorting') { return; }
+                handleButtonClick();
+                // random, semirandom, v, h, h2, s, magic
+                var sort_list = ['h2', 'v', 'h2', 'v', 'h2', 'v', 'h2', 'v', 'h2', 'v', 'h2', 'v', ];
+                setTimeout(function(){launchSorting(sort_list)},1)
+            };
+            document.getElementById('sort-button-quick').className = 'ready-button';
+            document.getElementById('sort-button-thorough').className = 'ready-button';
+        };
+
+    </script>
+    <style type="text/css">
+        body {
+            text-align: center;
+            padding: 0px;
+            margin: 0px;
+            color: #bbb;
+            font-family: 'Helvetica Neue', Helvetica, sans-serif;
+            background: #333;
+            font-size: 14px;
+            line-height: 20px;
+        }
+
+        #copy {
+            background: #000;
+            padding: 10px;
+            padding-left: 30px;
+            padding-right: 30px;
+            text-align: left;
+        }
+
+        #topbar {
+            text-align: left;
+        }
+
+        #sort-button-quick {
+            padding: 12px;
+            display: inline-block;
+            text-align: center;
+            border-style: solid;
+            border-width: 2px;
+            margin-left: 30px;
+        }
+        #sort-button-thorough {
+            padding: 12px;
+            display: inline-block;
+            text-align: center;
+            border-style: solid;
+            border-width: 2px;
+            margin-left: 15px;
+        }
+
+        .ready-button {
+            background: #777;
+            color: white;
+            border-color: white;
+        }
+        .ready-button > a {
+            color: white;
+            text-decoration: none;
+        }
+
+        .disabled-button {
+            font-style: italic;
+            background: #606060;
+            color: #ccc;
+            border-color: #bbb;
+        }
+        .disabled-button > a {
+            color: #ccc;
+            text-decoration: none;
+        }
+
+        #status {
+            padding: 12px;
+            display: inline-block;
+            color: #ff8;
+        }
+
+        #drop-zone-wrapper {
+            background: #000;
+        }
+        #drop-zone {
+            padding-top: 50px;
+            padding-bottom: 50px;
+            background: #000;
+            border-radius: 30px;
+            border-style: dashed;
+            border-color: black;
+            border-width: 10px;
+        }
+
+        .big-border {
+            border-color: #aaa !important;
+        }
+
+        .invisible {
+            display: none;
+        }
+        .dotted {
+            border-style: dotted;
+            border-color: red;
+            border-width: 1px;
+        }
+    </style>
+</head>
+<body id="body">
+
+    <div id="copy">
+        <h3> Image pixel sorter </h3>
+        <p>
+            Drag an image from your computer into this page, then click Sort.
+            The pixels will be sorted vertically by brightness and horizontally by hue.
+        </p>
+        <p>
+            To use an image from the web, drag it to your desktop first and then into this page.
+            Use small images or it will be very slow.
+        </p>
+        <p>
+            <a href="http://sorted-pixels.tumblr.com/" style="color:#8af;">Blog of results</a>
+        </p>
+    </div>
+
+    <div id="topbar">
+        <div id="sort-button-quick" class="disabled-button"><a> Two-Step Sort </a></div>
+        <div id="sort-button-thorough" class="disabled-button"><a> Twelve-Step Sort </a></div>
+        <div id="status">&nbsp;</div>
+    </div>
+
+    <div id="drop-zone-wrapper">
+        <div id="drop-zone">
+            <canvas id="my-canvas" width=100 height=100 class="invisible"></canvas>
+            <img id="my-image" src="img/sunset.png">
+        </div>
+    </div>
+
+</body>
+</html>
